@@ -6,7 +6,7 @@ import tempfile
 from typing import Annotated, Any, Dict, Optional, TypedDict
 
 from dotenv import load_dotenv
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.vectorstores import FAISS
@@ -18,6 +18,7 @@ from langgraph.graph import START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 import requests
+from gmail_tools import gmail_tools
 
 load_dotenv()
 
@@ -170,7 +171,7 @@ def rag_tool(query: str, thread_id: Optional[str] = None) -> dict:
     }
 
 
-tools = [search_tool, get_stock_price, calculator, rag_tool]
+tools = [search_tool, get_stock_price, calculator, rag_tool, *gmail_tools]
 llm_with_tools = llm.bind_tools(tools)
 
 # -------------------
@@ -193,9 +194,11 @@ def chat_node(state: ChatState, config=None):
         content=(
             "You are a helpful assistant. For questions about the uploaded PDF, call "
             "the `rag_tool` and include the thread_id "
-            f"`{thread_id}`. You can also use the web search, stock price, and "
-            "calculator tools when helpful. If no document is available, ask the user "
-            "to upload a PDF."
+            f"`{thread_id}`. You can also use the web search, stock price, "
+            "calculator, and Gmail tools when helpful. "
+            "For Gmail operations, always pass the thread_id parameter. "
+            "If the user hasn't connected Gmail yet, ask them to sign in via the sidebar. "
+            "If no document is available, ask the user to upload a PDF."
         )
     )
 
@@ -251,3 +254,14 @@ def extract_text(content) -> str:
             if isinstance(part, dict) and part.get("type") == "text"
         )
     return ""
+
+
+# -------------------
+# 9. Gmail re-exports (used by frontend)
+# -------------------
+from gmail_tools import (  # noqa: E402, F401
+    start_oauth,
+    get_oauth_status,
+    is_authenticated,
+    get_authenticated_email,
+)

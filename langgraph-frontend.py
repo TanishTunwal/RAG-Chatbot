@@ -1,3 +1,4 @@
+import time
 import uuid
 
 import streamlit as st
@@ -8,7 +9,11 @@ from langgraph_backend import (
     ingest_pdf,
     retrieve_all_threads,
     thread_document_metadata,
-    extract_text
+    extract_text,
+    start_oauth,
+    get_oauth_status,
+    is_authenticated,
+    get_authenticated_email,
 )
 
 
@@ -46,6 +51,9 @@ if "chat_threads" not in st.session_state:
 
 if "ingested_docs" not in st.session_state:
     st.session_state["ingested_docs"] = {}
+
+if "gmail_auth_pending" not in st.session_state:
+    st.session_state["gmail_auth_pending"] = False
 
 add_thread(st.session_state["thread_id"])
 
@@ -85,6 +93,48 @@ if uploaded_pdf:
             thread_docs[uploaded_pdf.name] = summary
             status_box.update(label="✅ PDF indexed", state="complete", expanded=False)
 
+# ============================ Gmail Section ============================
+st.sidebar.divider()
+st.sidebar.subheader("Gmail")
+
+gmail_authed = is_authenticated(thread_key)
+if gmail_authed:
+    email_addr = get_authenticated_email(thread_key)
+    st.sidebar.success(f"Connected as {email_addr}")
+else:
+    st.sidebar.warning("Not connected")
+
+if st.session_state["gmail_auth_pending"]:
+    status = get_oauth_status(thread_key)
+    if status is None:
+        st.session_state["gmail_auth_pending"] = False
+        st.rerun()
+    elif status["status"] == "pending":
+        st.sidebar.info("A browser window should open for Google sign-in. Complete it there, then come back.")
+        st.sidebar.caption("⏳ Waiting for authorization…")
+        time.sleep(2)
+        st.rerun()
+    elif status["status"] == "done":
+        st.session_state["gmail_auth_pending"] = False
+        st.sidebar.success(f"Signed in as {status['email']}")
+        st.rerun()
+    elif status["status"] == "error":
+        st.session_state["gmail_auth_pending"] = False
+        st.sidebar.error(f"Auth failed: {status['error']}")
+
+if st.sidebar.button(
+    "Sign in with Google",
+    use_container_width=True,
+    disabled=gmail_authed or st.session_state["gmail_auth_pending"],
+):
+    try:
+        start_oauth(thread_key)
+        st.session_state["gmail_auth_pending"] = True
+        st.rerun()
+    except Exception as e:
+        st.sidebar.error(str(e))
+
+st.sidebar.divider()
 st.sidebar.subheader("Past conversations")
 if not threads:
     st.sidebar.write("No past conversations yet.")
