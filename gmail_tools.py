@@ -124,6 +124,7 @@ def _make_flow():
     }
     return InstalledAppFlow.from_client_config(client_config, SCOPES)
 
+#starts google sign-in
 def start_oauth(thread_id: str):
     """Run the full OAuth flow in a background thread using a local server.
 
@@ -138,22 +139,24 @@ def start_oauth(thread_id: str):
                 port=0,
                 open_browser=True,
             )
+            #Python can talk to Gmail.
             service = build("gmail", "v1", credentials=creds)
             profile = service.users().getProfile(userId="me").execute()
             email_addr = profile.get("emailAddress", "")
+            #access refresh token,refresh token,email
             _save_tokens(thread_id, creds, email_addr)
             _pending_auth[thread_id] = {"status": "done", "email": email_addr}
         except Exception as exc:
             _pending_auth[thread_id] = {"status": "error", "error": str(exc)}
 
     _pending_auth[thread_id] = {"status": "pending"}
-    t = threading.Thread(target=_run, daemon=True)
+    t = threading.Thread(target=_run, daemon=True)#program does not wait for daemon threads to finish
     t.start()
 
 
 def get_oauth_status(thread_id: str) -> Optional[dict]:
     """Return the status dict for an in‑progress or completed OAuth flow."""
-    return _pending_auth.get(thread_id)
+    return _pending_auth.get(thread_id) #status -pending,error,done
 
 
 def get_credentials(_thread_id: str = "") -> Optional[Credentials]:
@@ -162,10 +165,11 @@ def get_credentials(_thread_id: str = "") -> Optional[Credentials]:
     if not data:
         return None
 
+    #Converts JSON stored in database into an actual Credentials object.
     creds = Credentials.from_authorized_user_info(json.loads(data["token_json"]))
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        creds.refresh(Request())#new refresh token
         _save_tokens("", creds, data.get("email", ""))
 
     return creds
@@ -199,6 +203,7 @@ def read_emails(thread_id: str, max_results: int = 10, query: str = "") -> list:
     """Fetch recent emails from the inbox. Optionally filter with a Gmail search
     query (e.g. 'from:someone@example.com')."""
     service = _get_service(thread_id)
+    #GET https://gmail.googleapis.com/gmail/v1/users/me/messages what it does
     results = (
         service.users()
         .messages()
@@ -216,10 +221,12 @@ def read_emails(thread_id: str, max_results: int = 10, query: str = "") -> list:
                 userId="me",
                 id=msg["id"],
                 format="metadata",
-                metadataHeaders=["From", "Subject", "Date"],
+                metadataHeaders=["From", "Subject", "Date"],# without it gmail return only header
+                #save bandwidth only required things fetched
             )
             .execute()
         )
+        #headers -> dict
         headers = {h["name"]: h["value"] for h in data.get("payload", {}).get("headers", [])}
         emails.append(
             {
@@ -288,12 +295,14 @@ def send_email(thread_id: str, to: str, subject: str, body: str, cc: str = "") -
     """Send a new email to one or more recipients."""
     service = _get_service(thread_id)
 
+    #Multipurpose Internet Mail Extensions (creates properly formatted email containing text.)
     msg = MIMEText(body)
     msg["To"] = to
     msg["Subject"] = subject
     if cc:
         msg["Cc"] = cc
 
+    #gmail api wants it in this 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
     sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
