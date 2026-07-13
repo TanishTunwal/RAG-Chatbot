@@ -1,6 +1,6 @@
 # LangGraph Multi-Utility Chatbot
 
-A multi-threaded chatbot built with **LangGraph**, **Streamlit**, and **Google Gemini**. Supports PDF-based RAG, web search, stock price lookup, a calculator, and **full Gmail integration** (read, search, send, reply, attachments).
+A multi-threaded chatbot built with **LangGraph**, **FastAPI**, **Next.js**, and **Google Gemini**. It supports PDF-based RAG, web search, stock price lookup, a calculator, and **full Gmail integration** with human approval for send/reply actions.
 
 ## Features
 
@@ -15,6 +15,7 @@ A multi-threaded chatbot built with **LangGraph**, **Streamlit**, and **Google G
   - Send new emails
   - Reply to existing threads
   - List and download attachments
+- **Human-in-the-loop approvals** — Gmail send and reply tool calls pause for user approval before execution
 - **Agent auto-selects tools** — the LLM decides which tool to call based on your question
 - **Persistent history** — chat history saved via LangGraph's SQLite checkpointer
 
@@ -30,10 +31,24 @@ A multi-threaded chatbot built with **LangGraph**, **Streamlit**, and **Google G
    - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` — Gmail OAuth credentials (see below)
    - `LANGCHAIN_API_KEY` — (optional) LangSmith tracing
 
-3. Run the app:
+3. Install the Next.js frontend dependencies:
    ```bash
-   streamlit run langgraph-frontend.py
+   cd web
+   npm install
    ```
+
+4. Run the backend API:
+   ```bash
+   uvicorn app_server:app --reload --port 8000
+   ```
+
+5. In a second terminal, run the frontend:
+   ```bash
+   cd web
+   npm run dev
+   ```
+
+6. Open http://localhost:3000
 
 ## Gmail Setup
 
@@ -53,7 +68,8 @@ A multi-threaded chatbot built with **LangGraph**, **Streamlit**, and **Google G
 | File | Description |
 |---|---|
 | `langgraph_backend.py` | LangGraph state graph, tools (search, stock, calculator, RAG, Gmail), LLM + embeddings |
-| `langgraph-frontend.py` | Streamlit UI — chat, PDF upload sidebar, Gmail login, thread management |
+| `app_server.py` | FastAPI bridge for threads, messages, approvals, PDF uploads, and Gmail auth |
+| `web/` | Next.js frontend with the clean chat UI and human approval card |
 | `gmail_tools.py` | Gmail OAuth (local-server flow), token persistence, 7 Gmail tools |
 | `chatbot.db` | SQLite database for checkpointer state and Gmail tokens |
 | `.env` | API keys and OAuth credentials |

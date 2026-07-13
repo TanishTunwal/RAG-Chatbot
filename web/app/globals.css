@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-body: "IBM Plex Sans";
+    --font-display: "Space Grotesk";
+  }
+
+  * {
+    @apply box-border;
+  }
+
+  html {
+    @apply scroll-smooth;
+    color-scheme: dark;
+  }
+
+  body {
+    @apply m-0 min-h-screen text-zinc-100 antialiased;
+    font-family: var(--font-body), sans-serif;
+    background: #0c0c10;
+  }
+
+  a {
+    @apply text-inherit no-underline;
+  }
+
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
+
+  button {
+    @apply cursor-pointer;
+  }
+
+  ::selection {
+    background: rgba(45, 212, 191, 0.25);
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(63, 63, 70, 0.5);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(63, 63, 70, 0.8);
+  }
+}
+
+@layer components {
+  .sr-only {
+    @apply absolute h-px w-px overflow-hidden whitespace-nowrap border-0 p-0 -m-px;
+    clip: rect(0, 0, 0, 0);
+  }
+}
+
+@layer utilities {
+  .font-inherit {
+    font-family: inherit;
+  }
+}
