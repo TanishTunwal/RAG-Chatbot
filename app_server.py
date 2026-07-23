@@ -99,7 +99,7 @@ async def _get_current_user(authorization: str = Header("")) -> Optional[dict]:
 app = FastAPI(title="LangGraph Chat API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://cove.vercel.app", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
