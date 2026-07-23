@@ -1,6 +1,9 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { GoogleLogin } from "@react-oauth/google";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type ThreadSummary = {
   thread_id: string;
@@ -38,9 +41,23 @@ type ThreadDetail = {
   pending_approval: PendingApproval | null;
 };
 
+type AuthUser = {
+  id: string;
+  name: string;
+  email: string;
+  picture: string;
+};
+
 type StatusKey = "gmail" | "pdf" | "workflow";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
+
+let _authToken: string | null = null;
+function getAuthToken() {
+  if (!_authToken) _authToken = typeof window !== "undefined" ? window.localStorage.getItem("cove.auth") : null;
+  return _authToken;
+}
 
 function formatDateLabel(value?: string) {
   if (!value) return "Now";
@@ -72,6 +89,8 @@ function emailPreview(toolCall: Record<string, unknown>) {
 }
 
 export default function Page() {
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [threadDetail, setThreadDetail] = useState<ThreadDetail | null>(null);
@@ -90,7 +109,7 @@ export default function Page() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [statusPopover, setStatusPopover] = useState<StatusKey | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
-  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+
   const [devMode, setDevMode] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [streamingMsgId, setStreamingMsgId] = useState<string | null>(null);
@@ -118,13 +137,13 @@ export default function Page() {
   const activeChatCount = messages.filter((message) => message.role !== "tool").length;
 
   async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${API_BASE}${path}`, {
-      headers: {
-        ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
-        ...(init?.headers ?? {}),
-      },
-      ...init,
-    });
+    const token = getAuthToken();
+    const headers: Record<string, string> = {
+      ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers as Record<string, string> ?? {}),
+    };
+    const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
 
     if (!response.ok) {
       const detail = await response.text();
@@ -135,6 +154,13 @@ export default function Page() {
   }
 
   async function loadThreads(preferredId?: string) {
+    if (!authUser) {
+      if (preferredId) {
+        setSelectedThreadId(preferredId);
+        window.localStorage.setItem("cove.threadId", preferredId);
+      }
+      return;
+    }
     const nextThreads = await fetchJson<ThreadSummary[]>("/api/threads");
     setThreads(nextThreads);
 
@@ -164,8 +190,50 @@ export default function Page() {
   }
 
   useEffect(() => {
-    loadThreads().catch((err: Error) => setError(err.message));
+    const saved = window.localStorage.getItem("cove.auth");
+    if (saved) {
+      _authToken = saved;
+      fetchJson<{ user: AuthUser }>("/api/auth/me").then((res) => {
+        setAuthUser(res.user);
+        setAuthLoading(false);
+      }).catch(() => {
+        window.localStorage.removeItem("cove.auth");
+        _authToken = null;
+        setAuthLoading(false);
+      });
+    } else {
+      setAuthLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    if (!authUser) return;
+    loadThreads().catch((err: Error) => setError(err.message));
+  }, [authUser]);
+
+  async function handleGoogleCredential(credential: string) {
+    try {
+      const res = await fetchJson<{ token: string; user: AuthUser }>("/api/auth/google", {
+        method: "POST",
+        body: JSON.stringify({ credential }),
+      });
+      _authToken = res.token;
+      window.localStorage.setItem("cove.auth", res.token);
+      setAuthUser(res.user);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Login failed");
+    }
+  }
+
+  function handleSignOut() {
+    window.localStorage.removeItem("cove.auth");
+    _authToken = null;
+    setAuthUser(null);
+    setSelectedThreadId(null);
+    setThreadDetail(null);
+    setMessages([]);
+    setThreads([]);
+  }
 
   useEffect(() => {
     if (!selectedThreadId) return;
@@ -401,10 +469,12 @@ export default function Page() {
   const drawerSections = [
     {
       title: "Gmail",
-      body: statusDetails.gmail.description,
-      label: statusDetails.gmail.label,
+      body: authUser ? statusDetails.gmail.description : "Sign in with Google to connect Gmail.",
+      label: authUser ? statusDetails.gmail.label : "Requires sign-in",
       render: () =>
-        gmailConnected ? (
+        !authUser ? (
+          <p className="mt-3 text-sm text-zinc-600">Sign in from the sidebar to access Gmail.</p>
+        ) : gmailConnected ? (
           <div className="mt-3 space-y-2 text-sm text-zinc-300">
             <div className="flex items-center justify-between rounded-lg bg-zinc-800/50 px-3 py-2">
               <span className="text-zinc-500">Account</span>
@@ -430,10 +500,12 @@ export default function Page() {
     },
     {
       title: "PDF",
-      body: statusDetails.pdf.description,
-      label: statusDetails.pdf.label,
+      body: authUser ? statusDetails.pdf.description : "Sign in to upload PDFs.",
+      label: authUser ? statusDetails.pdf.label : "Requires sign-in",
       render: () =>
-        activeDocument ? (
+        !authUser ? (
+          <p className="mt-3 text-sm text-zinc-600">Sign in from the sidebar to upload PDFs.</p>
+        ) : activeDocument ? (
           <button className="mt-3 text-sm text-teal-400 hover:text-teal-300" onClick={clearContext}>
             Clear document context
           </button>
@@ -441,8 +513,8 @@ export default function Page() {
     },
     {
       title: "Workflow",
-      body: statusDetails.workflow.description,
-      label: statusDetails.workflow.label,
+      body: authUser ? statusDetails.workflow.description : "Sign in to use workflow tools.",
+      label: authUser ? statusDetails.workflow.label : "Requires sign-in",
     },
     {
       title: "Settings",
@@ -460,6 +532,10 @@ export default function Page() {
       ),
     },
   ];
+
+  if (authLoading) {
+    return <div className="flex h-screen items-center justify-center bg-[#0c0c10]"><div className="h-5 w-5 animate-spin rounded-full border-2 border-teal-500 border-t-transparent" /></div>;
+  }
 
   return (
     <div className="flex h-screen bg-[#0c0c10] text-zinc-100">
@@ -532,17 +608,37 @@ export default function Page() {
         </div>
 
         <div className="border-t border-zinc-800 px-3 py-3">
-          <div className="flex items-center gap-3">
-            <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-zinc-800 text-sm font-semibold text-zinc-400">TU</div>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm text-zinc-300">Workspace User</div>
+          {authUser ? (
+            <div className="flex items-center gap-3">
+              {authUser.picture ? (
+                <img src={authUser.picture} alt="" className="h-8 w-8 shrink-0 rounded-full" />
+              ) : (
+                <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-zinc-800 text-sm font-semibold text-zinc-400">{authUser.name.charAt(0)}</div>
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm text-zinc-300">{authUser.name}</div>
+                <div className="truncate text-xs text-zinc-600">{authUser.email}</div>
+              </div>
+              <button className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" onClick={handleSignOut} title="Sign out">
+                <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+                  <path fill="currentColor" d="M16 17v-3H9v-2h7V9l5 4-5 4ZM14 7H5v10h9v2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h9v2Z" />
+                </svg>
+              </button>
             </div>
-            <button className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" onClick={() => setProfileMenuOpen((v) => !v)} title="Connected services">
-              <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
-                <path fill="currentColor" d="M11 5h2v14h-2V5Zm-6 6h14v2H5v-2Z" />
-              </svg>
-            </button>
-          </div>
+          ) : GOOGLE_CLIENT_ID ? (
+            <GoogleLogin
+              onSuccess={(res) => { if (res.credential) void handleGoogleCredential(res.credential); }}
+              onError={() => setError("Google sign-in failed")}
+              theme="filled_black"
+              size="large"
+              shape="pill"
+              text="signin_with"
+            />
+          ) : (
+            <p className="text-center text-xs text-zinc-600">
+              Set <code className="rounded bg-zinc-800 px-1 py-0.5">NEXT_PUBLIC_GOOGLE_CLIENT_ID</code> in <code className="rounded bg-zinc-800 px-1 py-0.5">.env.local</code>
+            </p>
+          )}
         </div>
       </aside>
 
@@ -558,27 +654,27 @@ export default function Page() {
 
           <div className="flex items-center gap-1.5">
             <button
-              className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${statusPopover === "gmail" ? "border-teal-500/30 bg-teal-500/10 text-teal-300" : "border-zinc-800 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"}`}
-              onClick={() => setStatusPopover(statusPopover === "gmail" ? null : "gmail")}
-              title={gmailConnected ? "Gmail connected" : "Gmail disconnected"}
+              className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${statusPopover === "gmail" ? "border-teal-500/30 bg-teal-500/10 text-teal-300" : !authUser ? "border-zinc-800/50 text-zinc-700 cursor-default" : "border-zinc-800 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"}`}
+              onClick={() => { if (!authUser) { setError("Sign in to access Gmail."); return; } setStatusPopover(statusPopover === "gmail" ? null : "gmail"); }}
+              title={!authUser ? "Sign in to connect Gmail" : gmailConnected ? "Gmail connected" : "Gmail disconnected"}
             >
-              <span className={`h-1.5 w-1.5 rounded-full ${gmailConnected ? "bg-green-500" : "bg-zinc-600"}`} />
+              <span className={`h-1.5 w-1.5 rounded-full ${!authUser ? "bg-zinc-800" : gmailConnected ? "bg-green-500" : "bg-zinc-600"}`} />
               Gmail
             </button>
             <button
-              className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${statusPopover === "pdf" ? "border-teal-500/30 bg-teal-500/10 text-teal-300" : "border-zinc-800 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"}`}
-              onClick={() => setStatusPopover(statusPopover === "pdf" ? null : "pdf")}
-              title={activeDocument ? "PDF indexed" : "No PDF"}
+              className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${statusPopover === "pdf" ? "border-teal-500/30 bg-teal-500/10 text-teal-300" : !authUser ? "border-zinc-800/50 text-zinc-700 cursor-default" : "border-zinc-800 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"}`}
+              onClick={() => { if (!authUser) { setError("Sign in to upload PDFs."); return; } setStatusPopover(statusPopover === "pdf" ? null : "pdf"); }}
+              title={!authUser ? "Sign in to upload PDFs" : activeDocument ? "PDF indexed" : "No PDF"}
             >
-              <span className={`h-1.5 w-1.5 rounded-full ${activeDocument ? "bg-green-500" : "bg-zinc-600"}`} />
+              <span className={`h-1.5 w-1.5 rounded-full ${!authUser ? "bg-zinc-800" : activeDocument ? "bg-green-500" : "bg-zinc-600"}`} />
               PDF
             </button>
             <button
-              className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${statusPopover === "workflow" ? "border-teal-500/30 bg-teal-500/10 text-teal-300" : "border-zinc-800 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"}`}
-              onClick={() => setStatusPopover(statusPopover === "workflow" ? null : "workflow")}
-              title={hasApproval ? "Approval pending" : "Autonomous"}
+              className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${statusPopover === "workflow" ? "border-teal-500/30 bg-teal-500/10 text-teal-300" : !authUser ? "border-zinc-800/50 text-zinc-700 cursor-default" : "border-zinc-800 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"}`}
+              onClick={() => { if (!authUser) { setError("Sign in to use workflow tools."); return; } setStatusPopover(statusPopover === "workflow" ? null : "workflow"); }}
+              title={!authUser ? "Sign in to use workflow" : hasApproval ? "Approval pending" : "Autonomous"}
             >
-              <span className={`h-1.5 w-1.5 rounded-full ${hasApproval ? "bg-amber-500" : "bg-zinc-600"}`} />
+              <span className={`h-1.5 w-1.5 rounded-full ${!authUser ? "bg-zinc-800" : hasApproval ? "bg-amber-500" : "bg-zinc-600"}`} />
               Workflow
             </button>
             <button className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" onClick={() => setDrawerOpen(true)} title="Settings">
@@ -690,10 +786,10 @@ export default function Page() {
                         }`}
                       >
                         <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wider text-zinc-500">
-                          <span>{message.role === "user" ? "You" : "Assistant"}</span>
+                          <span>{message.role === "user" ? "You" : `Assistant${message.tool_calls?.length ? ` · ${message.tool_calls.map((t) => String(t.name ?? "tool")).join(", ")}` : ""}`}</span>
                           {devMode && message.created_at ? <span className="text-zinc-600">{formatTime(message.created_at)}</span> : null}
                         </div>
-                        <div className="whitespace-pre-wrap break-words">{displayContent}{isStreaming ? <span className="inline-block h-4 w-0.5 animate-pulse bg-zinc-400 ml-0.5" /> : null}</div>
+                        <div className="prose prose-invert prose-sm max-w-none break-words [&_p]:leading-7 [&_p]:my-0 [&_ul]:my-0 [&_ol]:my-0 [&_li]:my-0 [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-sm [&_strong]:text-zinc-100">{displayContent ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown> : null}{isStreaming ? <span className="inline-block h-4 w-0.5 animate-pulse bg-zinc-400 ml-0.5" /> : null}</div>
                       </div>
                     </div>
                     );
@@ -740,9 +836,10 @@ export default function Page() {
 
               <div className="flex items-end gap-2">
                 <button
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-                  onClick={() => setAttachMenuOpen((v) => !v)}
-                  title="Attach file"
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-zinc-500 ${!authUser ? "cursor-not-allowed opacity-30" : "hover:bg-zinc-800 hover:text-zinc-300"}`}
+                  onClick={() => { if (!authUser) { setError("Sign in to upload files."); return; } setAttachMenuOpen((v) => !v); }}
+                  title={!authUser ? "Sign in to attach files" : "Attach file"}
+                  disabled={!authUser}
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
                     <path fill="currentColor" d="M16.5 6.5 9.07 13.93a3 3 0 1 0 4.24 4.24l7.5-7.5a5 5 0 0 0-7.07-7.07L6.2 11.14a7 7 0 1 0 9.9 9.9l1.06-1.06-1.41-1.41-1.06 1.06a5 5 0 1 1-7.07-7.07l7.53-7.53a3 3 0 1 1 4.24 4.24l-7.5 7.5a1 1 0 1 1-1.41-1.41l7.43-7.43-1.41-1.41Z" />
@@ -783,8 +880,13 @@ export default function Page() {
         </div>
 
         {error ? (
-          <div className="mx-4 mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-300 lg:mx-6">
-            {error}
+          <div className="mx-4 mb-4 flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm text-red-300 lg:mx-6">
+            <span className="flex-1">{error}</span>
+            <button className="mt-0.5 shrink-0 text-red-400/60 hover:text-red-300" onClick={() => setError(null)}>
+              <svg viewBox="0 0 24 24" aria-hidden="true" className="h-3.5 w-3.5">
+                <path fill="currentColor" d="m18.3 5.7-6.3 6.3-6.3-6.3-1.4 1.4 6.3 6.3-6.3 6.3 1.4 1.4 6.3-6.3 6.3 6.3 1.4-1.4-6.3-6.3 6.3-6.3-1.4-1.4Z" />
+              </svg>
+            </button>
           </div>
         ) : null}
       </main>
@@ -818,20 +920,6 @@ export default function Page() {
         </div>
       ) : null}
 
-      {profileMenuOpen ? (
-        <div className="fixed inset-0 z-50">
-          <button className="absolute inset-0 bg-black/30" onClick={() => setProfileMenuOpen(false)} />
-          <div className="absolute bottom-16 left-4 w-[220px] animate-fade-in rounded-lg border border-zinc-800 bg-[#15151c] p-4 shadow-xl lg:left-[280px]">
-            <div className="text-[11px] uppercase tracking-wider text-zinc-500">Connected Services</div>
-            <div className="mt-3 text-sm text-zinc-300">
-              <div className="flex items-center justify-between rounded-md bg-zinc-800/30 px-3 py-1.5">
-                <span>Gmail</span>
-                <span className={gmailConnected ? "text-teal-400" : "text-zinc-700"}>{gmailConnected ? "\u2713" : "\u2014"}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }

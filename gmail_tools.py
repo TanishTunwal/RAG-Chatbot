@@ -25,47 +25,15 @@ SCOPES = [
 
 TOKEN_DB = "chatbot.db"
 
-# gmail tokens are stored under this fixed key (not per thread) so the LLM
-# never has to worry about which thread_id to pass.
-_GMAIL_KEY = "gmail_user"
-
 # In-memory state for background OAuth flows
 _pending_auth: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
-# Token persistence (separate connection, same DB)
+# Token persistence — one token per thread_id
 # ---------------------------------------------------------------------------
-#its job is to make sure the SQLite database has the correct table structure.
 def _ensure_table():
-    conn = sqlite3.connect(TOKEN_DB, check_same_thread=False) #multi threading(False)
-    # Migrate from old schema (thread_id column) to new schema (key column)
-    cols = [
-        row[1]
-        for row in conn.execute("PRAGMA table_info(gmail_tokens)").fetchall()#configure the database or retrieve metadata.
-    ]
-    #checks for old schema exists
-    if cols and "thread_id" in cols:
-        #rename
-        conn.execute("ALTER TABLE gmail_tokens RENAME TO gmail_tokens_old")
-        #new table
-        conn.execute(
-            """CREATE TABLE gmail_tokens (
-                   key TEXT PRIMARY KEY,
-                   token_json TEXT,
-                   email TEXT
-               )"""
-        )
-        # take the most recent token and store under the fixed key
-        conn.execute(
-            f"INSERT OR IGNORE INTO gmail_tokens (key, token_json, email) "
-            f"SELECT '{_GMAIL_KEY}', token_json, email FROM gmail_tokens_old "
-            f"WHERE thread_id = (SELECT thread_id FROM gmail_tokens_old LIMIT 1)"
-        )
-        conn.execute("DROP TABLE gmail_tokens_old")
-        conn.commit()
-
-
+    conn = sqlite3.connect(TOKEN_DB, check_same_thread=False)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS gmail_tokens (
                key TEXT PRIMARY KEY,
@@ -77,28 +45,27 @@ def _ensure_table():
     conn.close()
 
 
-def _save_tokens(_thread_id: str, creds: Credentials, email_addr: str = ""):
+def _save_tokens(thread_id: str, creds: Credentials, email_addr: str = ""):
     _ensure_table()
     conn = sqlite3.connect(TOKEN_DB, check_same_thread=False)
     conn.execute(
         "INSERT OR REPLACE INTO gmail_tokens (key, token_json, email) VALUES (?, ?, ?)",
-        (_GMAIL_KEY, creds.to_json(), email_addr),
+        (thread_id, creds.to_json(), email_addr),
     )
     conn.commit()
     conn.close()
 
 
-def _load_tokens() -> Optional[dict]:
+def _load_tokens(thread_id: str) -> Optional[dict]:
     _ensure_table()
     conn = sqlite3.connect(TOKEN_DB, check_same_thread=False)
     row = conn.execute(
         "SELECT token_json, email FROM gmail_tokens WHERE key = ?",
-        (_GMAIL_KEY,),
-    ).fetchone()#fetch one
-
+        (thread_id,),
+    ).fetchone()
     conn.close()
     if row:
-        return {"token_json": row[0], "email": row[1]}  
+        return {"token_json": row[0], "email": row[1]}
     return None
 
 
@@ -159,9 +126,9 @@ def get_oauth_status(thread_id: str) -> Optional[dict]:
     return _pending_auth.get(thread_id) #status -pending,error,done
 
 
-def get_credentials(_thread_id: str = "") -> Optional[Credentials]:
-    """Return valid (possibly refreshed) credentials."""
-    data = _load_tokens()
+def get_credentials(thread_id: str = "") -> Optional[Credentials]:
+    """Return valid (possibly refreshed) credentials for a thread."""
+    data = _load_tokens(thread_id)
     if not data:
         return None
 
@@ -170,28 +137,28 @@ def get_credentials(_thread_id: str = "") -> Optional[Credentials]:
 
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())#new refresh token
-        _save_tokens("", creds, data.get("email", ""))
+        _save_tokens(thread_id, creds, data.get("email", ""))
 
     return creds
 
 
-def _get_service(_thread_id: str = ""):
-    creds = get_credentials()
+def _get_service(thread_id: str = ""):
+    creds = get_credentials(thread_id)
     if not creds:
         raise PermissionError("Gmail not connected. Sign in with Google first.")
     return build("gmail", "v1", credentials=creds)
 
 
-def is_authenticated(_thread_id: str = "") -> bool:
+def is_authenticated(thread_id: str = "") -> bool:
     try:
-        creds = get_credentials()
+        creds = get_credentials(thread_id)
         return creds is not None and creds.valid
     except Exception:
         return False
 
 
-def get_authenticated_email(_thread_id: str = "") -> str:
-    data = _load_tokens()
+def get_authenticated_email(thread_id: str = "") -> str:
+    data = _load_tokens(thread_id)
     return data.get("email", "") if data else ""
 
 

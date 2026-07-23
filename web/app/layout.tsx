@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Sans, Space_Grotesk } from "next/font/google";
 
+import AuthProvider from "./auth-provider";
 import "./globals.css";
 
 const bodyFont = IBM_Plex_Sans({
@@ -24,7 +25,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en">
       <body className={`${bodyFont.variable} ${displayFont.variable}`}>
-        {children}
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );

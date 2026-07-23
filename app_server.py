@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 
@@ -29,6 +32,69 @@ THREAD_AWARE_TOOL_NAMES = {
 }
 
 TOOL_REGISTRY = {tool.name: tool for tool in backend.tools}
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+class AuthRequest(BaseModel):
+    credential: str
+
+
+def _verify_google_credential(credential: str) -> Optional[dict]:
+    try:
+        info = id_token.verify_oauth2_token(
+            credential,
+            google_requests.Request(),
+            os.getenv("GOOGLE_CLIENT_ID_WEB", os.getenv("GOOGLE_CLIENT_ID", "")),
+        )
+        if info.get("iss") not in ("accounts.google.com", "https://accounts.google.com"):
+            return None
+        return info
+    except Exception:
+        return None
+
+
+def _get_or_create_user(google_info: dict) -> dict:
+    uid = google_info["sub"]
+    conn = _connect()
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO users (id, name, email, picture, created_at) VALUES (?, ?, ?, ?, ?)",
+            (uid, google_info.get("name", ""), google_info.get("email", ""),
+             google_info.get("picture", ""), _now()),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def _create_session(user_id: str) -> str:
+    token = str(uuid.uuid4())
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO user_sessions (token, user_id, created_at) VALUES (?, ?, ?)",
+        (token, user_id, _now()),
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+async def _get_current_user(authorization: str = Header("")) -> Optional[dict]:
+    if not authorization.startswith("Bearer "):
+        return None
+    token = authorization[7:]
+    conn = _connect()
+    row = conn.execute(
+        "SELECT u.id, u.name, u.email, u.picture FROM user_sessions s JOIN users u ON s.user_id = u.id WHERE s.token = ?",
+        (token,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
 
 app = FastAPI(title="LangGraph Chat API")
 app.add_middleware(
@@ -61,13 +127,36 @@ def _connect() -> sqlite3.Connection:
 def _ensure_tables() -> None:
     conn = _connect()
     conn.execute(
-        """CREATE TABLE IF NOT EXISTS chat_threads (
-               thread_id TEXT PRIMARY KEY,
-               title TEXT NOT NULL,
-               created_at TEXT NOT NULL,
-               updated_at TEXT NOT NULL
+        """CREATE TABLE IF NOT EXISTS users (
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               email TEXT NOT NULL,
+               picture TEXT,
+               created_at TEXT NOT NULL
            )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_sessions (
+               token TEXT PRIMARY KEY,
+               user_id TEXT NOT NULL,
+               created_at TEXT NOT NULL,
+               FOREIGN KEY (user_id) REFERENCES users(id)
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS chat_threads (
+               thread_id TEXT PRIMARY KEY,
+               user_id TEXT,
+               title TEXT NOT NULL,
+               created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               FOREIGN KEY (user_id) REFERENCES users(id)
+           )"""
+    )
+    # Add user_id column if it doesn't exist (migration)
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(chat_threads)").fetchall()]
+    if "user_id" not in cols:
+        conn.execute("ALTER TABLE chat_threads ADD COLUMN user_id TEXT REFERENCES users(id)")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS chat_messages (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,17 +185,23 @@ def _ensure_tables() -> None:
     conn.close()
 
 
-def _ensure_thread(thread_id: str, title: str = APP_THREAD_TITLE) -> None:
+def _ensure_thread(thread_id: str, title: str = APP_THREAD_TITLE, user_id: str = "") -> None:
     _ensure_tables()
     conn = _connect()
     existing = conn.execute(
-        "SELECT thread_id FROM chat_threads WHERE thread_id = ?", (thread_id,)
+        "SELECT thread_id, user_id FROM chat_threads WHERE thread_id = ?", (thread_id,)
     ).fetchone()
     if existing is None:
         conn.execute(
-            """INSERT INTO chat_threads (thread_id, title, created_at, updated_at)
-               VALUES (?, ?, ?, ?)""",
-            (thread_id, title, _now(), _now()),
+            """INSERT INTO chat_threads (thread_id, user_id, title, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (thread_id, user_id or None, title, _now(), _now()),
+        )
+        conn.commit()
+    elif user_id and not existing["user_id"]:
+        conn.execute(
+            "UPDATE chat_threads SET user_id = ? WHERE thread_id = ?",
+            (user_id, thread_id),
         )
         conn.commit()
     conn.close()
@@ -124,16 +219,16 @@ def _summarize_chat_title(content: str) -> str:
     return " ".join(words[:7])[:48]
 
 
-def create_thread() -> dict:
+def create_thread(user_id: str = "") -> dict:
     thread_id = str(uuid.uuid4())
-    _ensure_thread(thread_id)
+    _ensure_thread(thread_id, user_id=user_id)
     return {"thread_id": thread_id}
 
 
-def _sync_checkpoint_threads() -> None:
+def _sync_checkpoint_threads(user_id: str = "") -> None:
     _ensure_tables()
     for thread_id in backend.retrieve_all_threads():
-        _ensure_thread(str(thread_id))
+        _ensure_thread(str(thread_id), user_id=user_id)
 
 
 def _row_to_thread(row: sqlite3.Row) -> dict:
@@ -145,11 +240,14 @@ def _row_to_thread(row: sqlite3.Row) -> dict:
     }
 
 
-def list_threads() -> list[dict]:
-    _sync_checkpoint_threads()
+def list_threads(user_id: str = "") -> list[dict]:
+    if not user_id:
+        return []
     conn = _connect()
+    _sync_checkpoint_threads(user_id=user_id)
     rows = conn.execute(
-        "SELECT thread_id, title, created_at, updated_at FROM chat_threads ORDER BY updated_at DESC, created_at DESC"
+        "SELECT thread_id, title, created_at, updated_at FROM chat_threads WHERE user_id = ? ORDER BY updated_at DESC, created_at DESC",
+        (user_id,),
     ).fetchall()
     conn.close()
     return [_row_to_thread(row) for row in rows]
@@ -359,8 +457,8 @@ def _mark_pending_approval(approval_id: str, status: str, note: str = "") -> Non
 
 
 def clear_thread_context(thread_id: str) -> None:
-    _THREAD_RETRIEVERS.pop(str(thread_id), None)
-    _THREAD_METADATA.pop(str(thread_id), None)
+    backend._THREAD_RETRIEVERS.pop(str(thread_id), None)
+    backend._THREAD_METADATA.pop(str(thread_id), None)
 
 
 def delete_thread(thread_id: str) -> None:
@@ -371,6 +469,7 @@ def delete_thread(thread_id: str) -> None:
         conn.execute("DELETE FROM chat_threads WHERE thread_id = ?", (thread_id,))
         conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
         conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
+        conn.execute("DELETE FROM gmail_tokens WHERE key = ?", (thread_id,))
         conn.commit()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete thread: {e}")
@@ -447,24 +546,57 @@ def _chat_completion(thread_id: str, user_content: Optional[str] = None) -> dict
     raise HTTPException(status_code=500, detail="Tool loop exceeded the safe execution limit.")
 
 
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/google")
+def api_auth_google(payload: AuthRequest) -> dict:
+    info = _verify_google_credential(payload.credential)
+    if not info:
+        raise HTTPException(status_code=401, detail="Invalid Google credential")
+    user = _get_or_create_user(info)
+    token = _create_session(user["id"])
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+            "picture": user["picture"],
+        },
+    }
+
+
+@app.get("/api/auth/me")
+def api_auth_me(user: dict = Depends(_get_current_user)) -> dict:
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"user": user}
+
+
+# ---------------------------------------------------------------------------
+# App endpoints
+# ---------------------------------------------------------------------------
+
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True}
 
 
 @app.get("/api/threads")
-def api_list_threads() -> list[dict]:
-    return list_threads()
+def api_list_threads(user: dict = Depends(_get_current_user)) -> list[dict]:
+    return list_threads(user.get("id") if user else "")
 
 
 @app.post("/api/threads")
-def api_create_thread() -> dict:
-    return create_thread()
+def api_create_thread(user: dict = Depends(_get_current_user)) -> dict:
+    return create_thread(user.get("id") if user else "")
 
 
 @app.get("/api/threads/{thread_id}")
-def api_get_thread(thread_id: str) -> dict:
-    _ensure_thread(thread_id)
+def api_get_thread(thread_id: str, user: dict = Depends(_get_current_user)) -> dict:
+    _ensure_thread(thread_id, user_id=user.get("id") if user else "")
     _load_checkpoint_history(thread_id)
     conn = _connect()
     thread = conn.execute(
