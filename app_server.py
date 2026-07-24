@@ -107,6 +107,19 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal error: {exc}"},
+        headers={
+            "Access-Control-Allow-Origin": "https://cove-smoky-ten.vercel.app",
+            "Access-Control-Allow-Credentials": "true",
+        },
+    )
+
+
 class ChatRequest(BaseModel):
     content: str
 
@@ -553,20 +566,25 @@ def _chat_completion(thread_id: str, user_content: Optional[str] = None) -> dict
 
 @app.post("/api/auth/google")
 def api_auth_google(payload: AuthRequest) -> dict:
-    info = _verify_google_credential(payload.credential)
-    if not info:
-        raise HTTPException(status_code=401, detail="Invalid Google credential")
-    user = _get_or_create_user(info)
-    token = _create_session(user["id"])
-    return {
-        "token": token,
-        "user": {
-            "id": user["id"],
-            "name": user["name"],
-            "email": user["email"],
-            "picture": user["picture"],
-        },
-    }
+    try:
+        info = _verify_google_credential(payload.credential)
+        if not info:
+            raise HTTPException(status_code=401, detail="Invalid Google credential")
+        user = _get_or_create_user(info)
+        token = _create_session(user["id"])
+        return {
+            "token": token,
+            "user": {
+                "id": user["id"],
+                "name": user["name"],
+                "email": user["email"],
+                "picture": user["picture"],
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Auth error: {exc}")
 
 
 @app.get("/api/auth/me")
