@@ -33,24 +33,56 @@ _pending_auth: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
-# Token persistence — one token per thread_id
+# Token persistence — per-user, per-thread fallback
 # ---------------------------------------------------------------------------
 def _ensure_table():
     conn = sqlite3.connect(TOKEN_DB, check_same_thread=False)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS gmail_tokens (
                key TEXT PRIMARY KEY,
+               user_id TEXT,
                token_json TEXT,
                email TEXT
            )"""
     )
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(gmail_tokens)").fetchall()]
+    if "user_id" not in cols:
+        conn.execute("ALTER TABLE gmail_tokens ADD COLUMN user_id TEXT")
     conn.commit()
     conn.close()
 
 
+def _thread_owner(thread_id: str) -> str:
+    try:
+        conn = sqlite3.connect(TOKEN_DB, check_same_thread=False)
+        row = conn.execute(
+            "SELECT user_id FROM chat_threads WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        conn.close()
+        return str(row[0]) if row and row[0] else ""
+    except Exception:
+        return ""
+
+
 def _save_tokens(thread_id: str, creds: Credentials, email_addr: str = ""):
     _ensure_table()
+    uid = _thread_owner(thread_id)
     conn = sqlite3.connect(TOKEN_DB, check_same_thread=False)
+    # Save by user_id when available, otherwise by thread_id
+    if uid:
+        existing = conn.execute(
+            "SELECT 1 FROM gmail_tokens WHERE key = ?", (uid,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE gmail_tokens SET token_json = ?, email = ? WHERE key = ?",
+                (creds.to_json(), email_addr, uid),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO gmail_tokens (key, user_id, token_json, email) VALUES (?, ?, ?, ?)",
+                (uid, uid, creds.to_json(), email_addr),
+            )
     conn.execute(
         "INSERT OR REPLACE INTO gmail_tokens (key, token_json, email) VALUES (?, ?, ?)",
         (thread_id, creds.to_json(), email_addr),
@@ -61,7 +93,16 @@ def _save_tokens(thread_id: str, creds: Credentials, email_addr: str = ""):
 
 def _load_tokens(thread_id: str) -> Optional[dict]:
     _ensure_table()
+    uid = _thread_owner(thread_id)
     conn = sqlite3.connect(TOKEN_DB, check_same_thread=False)
+    # Prefer user-level token
+    if uid:
+        row = conn.execute(
+            "SELECT token_json, email FROM gmail_tokens WHERE user_id = ?", (uid,)
+        ).fetchone()
+        if row:
+            conn.close()
+            return {"token_json": row[0], "email": row[1]}
     row = conn.execute(
         "SELECT token_json, email FROM gmail_tokens WHERE key = ?",
         (thread_id,),

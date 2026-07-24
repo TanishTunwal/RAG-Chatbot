@@ -198,7 +198,11 @@ def chat_node(state: ChatState, config=None):
             "calculator, and Gmail tools when helpful. "
             "For Gmail operations, always pass the thread_id parameter. "
             "If the user hasn't connected Gmail yet, ask them to sign in via the sidebar. "
-            "If no document is available, ask the user to upload a PDF."
+            "If no document is available, ask the user to upload a PDF.\n\n"
+            "When sending or composing emails:\n"
+            "- Use plain text only — no markdown, no bold, no lists with asterisks.\n"
+            "- The signature should always be the user's name (not 'Your AI Assistant').\n"
+            "- Keep the email body clean, professional, and well-structured with plain paragraphs."
         )
     )
 
