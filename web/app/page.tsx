@@ -79,6 +79,22 @@ function previewToolCall(toolCall: Record<string, unknown>) {
   return `${name}\n${args}`;
 }
 
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/(\*{1,3}|_{1,3})(.*?)\1/g, "$2")
+    .replace(/^[-*_]{3,}\s*$/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/^[\s]*[-*+]\s+/gm, "")
+    .replace(/^[\s]*\d+\.\s+/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function emailPreview(toolCall: Record<string, unknown>) {
   const args = (toolCall.args ?? {}) as Record<string, string>;
   const name = String(toolCall.name ?? "");
@@ -758,7 +774,7 @@ export default function Page() {
                                         <span className="text-zinc-200">{email.subject}</span>
                                       </div>
                                       <div className="mt-2 rounded-md bg-zinc-800/30 p-3">
-                                        <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-300">{email.body}</p>
+                                        <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-300">{stripMarkdown(email.body)}</p>
                                       </div>
                                     </div>
                                   </div>

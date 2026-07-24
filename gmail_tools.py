@@ -268,6 +268,36 @@ def get_authenticated_email(thread_id: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _strip_markdown(text: str) -> str:
+    """Convert basic markdown to plain text for email delivery."""
+    import re
+    # Remove code blocks
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    # Remove inline code
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Remove images
+    text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', r'\1', text)
+    # Replace links with just the text
+    text = re.sub(r'\[([^\]]*)\]\([^)]+\)', r'\1', text)
+    # Remove heading markers
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Remove bold/italic markers
+    text = re.sub(r'(\*{1,3}|_{1,3})(.*?)\1', r'\2', text)
+    # Remove horizontal rules
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Remove blockquote markers
+    text = re.sub(r'^>\s?', '', text, flags=re.MULTILINE)
+    # Remove list markers ( - or * or 1. )
+    text = re.sub(r'^[\s]*[-*+]\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^[\s]*\d+\.\s+', '', text, flags=re.MULTILINE)
+    # Collapse multiple blank lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
 # Tools (each accepts thread_id so the LLM can pass it through)
 # ---------------------------------------------------------------------------
 @tool
@@ -367,14 +397,14 @@ def send_email(thread_id: str, to: str, subject: str, body: str, cc: str = "") -
     """Send a new email to one or more recipients."""
     service = _get_service(thread_id)
 
-    #Multipurpose Internet Mail Extensions (creates properly formatted email containing text.)
-    msg = MIMEText(body)
+    # Strip markdown for clean email delivery
+    clean_body = _strip_markdown(body)
+    msg = MIMEText(clean_body)
     msg["To"] = to
     msg["Subject"] = subject
     if cc:
         msg["Cc"] = cc
 
-    #gmail api wants it in this 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
     sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
@@ -408,7 +438,8 @@ def reply_to_email(thread_id: str, message_id: str, body: str) -> dict:
     if not subject.lower().startswith("re:"):
         subject = f"Re: {subject}"
 
-    msg = MIMEText(body)
+    clean_body = _strip_markdown(body)
+    msg = MIMEText(clean_body)
     msg["To"] = h.get("From", "")
     msg["Subject"] = subject
     msg["In-Reply-To"] = h.get("Message-ID", "")
