@@ -8,6 +8,8 @@ import threading
 from email.mime.text import MIMEText
 from typing import Optional
 
+import requests
+
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -183,11 +185,32 @@ def handle_oauth_callback(thread_id: str, code: str) -> None:
         "GMAIL_REDIRECT_URI",
         "http://localhost:8000/api/gmail/callback",
     )
-    flow = _make_web_flow(redirect_uri)
+    client_id = os.getenv("GOOGLE_CLIENT_ID_WEB_GMAIL")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET_WEB_GMAIL")
+
+    # Manual token exchange — bypasses Flow's strict scope validation
+    token_data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
     if pending and pending.get("code_verifier"):
-        flow.code_verifier = pending["code_verifier"]
-    flow.fetch_token(code=code)
-    creds = flow.credentials
+        token_data["code_verifier"] = pending["code_verifier"]
+
+    resp = requests.post("https://oauth2.googleapis.com/token", data=token_data, timeout=30)
+    resp.raise_for_status()
+    token_json = resp.json()
+
+    creds = Credentials(
+        token=token_json.get("access_token"),
+        refresh_token=token_json.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=token_json.get("scope", " ").split(" "),
+    )
 
     service = build("gmail", "v1", credentials=creds)
     profile = service.users().getProfile(userId="me").execute()
