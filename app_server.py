@@ -57,6 +57,7 @@ def _verify_google_credential(credential: str) -> Optional[dict]:
 
 
 def _get_or_create_user(google_info: dict) -> dict:
+    _ensure_tables()
     uid = google_info["sub"]
     conn = _connect()
     row = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
@@ -73,6 +74,7 @@ def _get_or_create_user(google_info: dict) -> dict:
 
 
 def _create_session(user_id: str) -> str:
+    _ensure_tables()
     token = str(uuid.uuid4())
     conn = _connect()
     conn.execute(
@@ -87,6 +89,7 @@ def _create_session(user_id: str) -> str:
 async def _get_current_user(authorization: str = Header("")) -> Optional[dict]:
     if not authorization.startswith("Bearer "):
         return None
+    _ensure_tables()
     token = authorization[7:]
     conn = _connect()
     row = conn.execute(
