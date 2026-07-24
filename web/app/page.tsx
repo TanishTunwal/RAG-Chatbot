@@ -418,14 +418,18 @@ export default function Page() {
     setGmailBusy(true);
     setError(null);
     try {
-      await fetchJson(`/api/threads/${threadId}/gmail/start`, { method: "POST" });
+      const result = await fetchJson<{ status: string; auth_url?: string }>(`/api/threads/${threadId}/gmail/start`, { method: "POST" });
+      if (result.auth_url) {
+        window.open(result.auth_url, "_blank");
+      }
       let done = false;
       for (let attempt = 0; attempt < 30 && !done; attempt += 1) {
         const status = await fetchJson<{ connected: boolean; email: string; auth_pending: Record<string, unknown> | null }>(
           `/api/threads/${threadId}/gmail/status`,
         );
         setGmailStatus(status);
-        if (status.connected || !status.auth_pending || status.auth_pending.status === "error") {
+        const pendingStatus = status.auth_pending?.status;
+        if (status.connected || pendingStatus === "done" || pendingStatus === "error") {
           done = true;
         } else {
           await new Promise((resolve) => setTimeout(resolve, 1500));

@@ -11,7 +11,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 from googleapiclient.discovery import build
 from langchain_core.tools import tool
 
@@ -91,13 +91,68 @@ def _make_flow():
     }
     return InstalledAppFlow.from_client_config(client_config, SCOPES)
 
-#starts google sign-in
-def start_oauth(thread_id: str):
-    """Run the full OAuth flow in a background thread using a local server.
+# ---------------------------------------------------------------------------
+# OAuth — web‑server flow (redirect‑based, for production)
+# ---------------------------------------------------------------------------
+def _make_web_flow(redirect_uri: str):
+    client_id = os.getenv("GOOGLE_CLIENT_ID_WEB_GMAIL")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET_WEB_GMAIL")
+    if not client_id or not client_secret:
+        raise RuntimeError("GOOGLE_CLIENT_ID_WEB_GMAIL and GOOGLE_CLIENT_SECRET_WEB_GMAIL not set")
+    client_config = {
+        "web": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uris": [redirect_uri],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
+    return Flow.from_client_config(client_config, SCOPES, redirect_uri=redirect_uri)
 
-    The browser opens automatically; the user just authorises and the
-    local server captures the redirect.  No manual code copying needed.
-    """
+
+def generate_auth_url(thread_id: str) -> str:
+    """Generate a Google OAuth URL for the user to visit in their browser."""
+    redirect_uri = os.getenv(
+        "GMAIL_REDIRECT_URI",
+        "http://localhost:8000/api/gmail/callback",
+    )
+    flow = _make_web_flow(redirect_uri)
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        state=thread_id,
+        prompt="consent",
+    )
+    _pending_auth[thread_id] = {"status": "pending", "auth_url": auth_url}
+    return auth_url
+
+
+def handle_oauth_callback(thread_id: str, code: str) -> None:
+    """Exchange authorization code for credentials and save them."""
+    redirect_uri = os.getenv(
+        "GMAIL_REDIRECT_URI",
+        "http://localhost:8000/api/gmail/callback",
+    )
+    flow = _make_web_flow(redirect_uri)
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+
+    service = build("gmail", "v1", credentials=creds)
+    profile = service.users().getProfile(userId="me").execute()
+    email_addr = profile.get("emailAddress", "")
+
+    _save_tokens(thread_id, creds, email_addr)
+    _pending_auth[thread_id] = {"status": "done", "email": email_addr}
+
+
+#starts google sign-in
+def start_oauth(thread_id: str) -> Optional[str]:
+    """Start Gmail OAuth. Returns an auth_url in production (web flow),
+    or None in local dev (background local-server flow)."""
+    if os.getenv("GOOGLE_CLIENT_ID_WEB_GMAIL"):
+        return generate_auth_url(thread_id)
+
     def _run():
         try:
             flow = _make_flow()
@@ -106,19 +161,18 @@ def start_oauth(thread_id: str):
                 port=0,
                 open_browser=True,
             )
-            #Python can talk to Gmail.
             service = build("gmail", "v1", credentials=creds)
             profile = service.users().getProfile(userId="me").execute()
             email_addr = profile.get("emailAddress", "")
-            #access refresh token,refresh token,email
             _save_tokens(thread_id, creds, email_addr)
             _pending_auth[thread_id] = {"status": "done", "email": email_addr}
         except Exception as exc:
             _pending_auth[thread_id] = {"status": "error", "error": str(exc)}
 
     _pending_auth[thread_id] = {"status": "pending"}
-    t = threading.Thread(target=_run, daemon=True)#program does not wait for daemon threads to finish
+    t = threading.Thread(target=_run, daemon=True)
     t.start()
+    return None
 
 
 def get_oauth_status(thread_id: str) -> Optional[dict]:

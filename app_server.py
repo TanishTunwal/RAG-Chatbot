@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -677,8 +678,33 @@ def api_delete_thread(thread_id: str) -> dict:
 
 @app.post("/api/threads/{thread_id}/gmail/start")
 def api_start_gmail(thread_id: str) -> dict:
-    backend.start_oauth(thread_id)
-    return {"status": "pending", "email": backend.get_authenticated_email(thread_id)}
+    auth_url = backend.start_oauth(thread_id)
+    return {
+        "status": "pending",
+        "email": backend.get_authenticated_email(thread_id),
+        "auth_url": auth_url,
+    }
+
+
+@app.get("/api/gmail/callback")
+def api_gmail_callback(code: str, state: str) -> HTMLResponse:
+    """OAuth redirect target — exchanges code for token and saves it."""
+    try:
+        backend.handle_oauth_callback(state, code)
+        html = """
+        <!DOCTYPE html>
+        <html><body style="background:#0c0c10;color:#e4e4e7;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;margin:0">
+        <div style="text-align:center"><h2 style="color:#14b8a6">Gmail Connected!</h2>
+        <p>You can close this tab and return to Cove.</p></div></body></html>
+        """
+    except Exception as exc:
+        html = f"""
+        <!DOCTYPE html>
+        <html><body style="background:#0c0c10;color:#e4e4e7;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;margin:0">
+        <div style="text-align:center"><h2 style="color:#f87171">Connection Failed</h2>
+        <p>{exc}</p></div></body></html>
+        """
+    return HTMLResponse(content=html)
 
 
 @app.get("/api/threads/{thread_id}/gmail/status")
