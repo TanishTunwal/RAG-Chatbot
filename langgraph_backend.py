@@ -264,4 +264,5 @@ from gmail_tools import (  # noqa: E402, F401
     get_oauth_status,
     is_authenticated,
     get_authenticated_email,
+    handle_oauth_callback,
 )
