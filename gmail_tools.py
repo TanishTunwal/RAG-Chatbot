@@ -124,17 +124,24 @@ def generate_auth_url(thread_id: str) -> str:
         state=thread_id,
         prompt="consent",
     )
-    _pending_auth[thread_id] = {"status": "pending", "auth_url": auth_url}
+    _pending_auth[thread_id] = {
+        "status": "pending",
+        "auth_url": auth_url,
+        "code_verifier": flow.code_verifier,
+    }
     return auth_url
 
 
 def handle_oauth_callback(thread_id: str, code: str) -> None:
     """Exchange authorization code for credentials and save them."""
+    pending = _pending_auth.get(thread_id)
     redirect_uri = os.getenv(
         "GMAIL_REDIRECT_URI",
         "http://localhost:8000/api/gmail/callback",
     )
     flow = _make_web_flow(redirect_uri)
+    if pending and pending.get("code_verifier"):
+        flow.code_verifier = pending["code_verifier"]
     flow.fetch_token(code=code)
     creds = flow.credentials
 
